@@ -6,6 +6,7 @@ Models cache at  %APPDATA%\Talkloom\models\
 Log file at      %APPDATA%\Talkloom\log.txt
 """
 
+import copy
 import json
 import logging
 import os
@@ -50,10 +51,36 @@ def setup_logging():
     ))
     root = logging.getLogger()
     root.setLevel(logging.INFO)
+    _close_log_handlers()          # idempotent: safe to call more than once
     root.addHandler(handler)
     # Also echo to console when running in dev mode (not frozen).
     if not getattr(sys, "frozen", False):
         root.addHandler(logging.StreamHandler())
+
+
+def _close_log_handlers():
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
+
+
+def clear_logs():
+    """Delete log.txt and its rotated copies. Windows refuses to delete a
+    file that is still open, so the log handler is closed first and
+    re-created afterwards."""
+    _close_log_handlers()
+    for name in ("log.txt", "log.txt.1", "log.txt.2"):
+        try:
+            os.remove(os.path.join(app_data_dir(), name))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass   # can't log it — the logger is closed right now
+    setup_logging()
 
 
 # ---------------------------------------------------------------- config ----
@@ -67,12 +94,17 @@ DEFAULTS = {
     # Custom vocabulary: biases Whisper (hotwords) and drives fuzzy
     # post-correction of near-miss transcriptions.
     "dictionary": [],
-    "model_size": "base",              # tiny / base / small / medium
+    "model_size": "small",             # tiny / base / small / medium
     "language": "en",                  # ISO code or null = auto-detect
     "start_with_windows": False,
     # OFF by default: when on, every dictation transcript is appended to
     # history.txt in plaintext. Deliberate opt-in — see history.py.
     "keep_history": False,
+    # Saying "new line" / "new paragraph" inserts a line break.
+    "voice_commands": True,
+    # Show Whisper a short, well-punctuated example before each dictation so
+    # it writes in the same style. Set to false if odd text ever appears.
+    "punctuation_hint": True,
 }
 
 
@@ -80,15 +112,19 @@ class Config:
     """Thin wrapper around config.json with defaults and atomic-ish save."""
 
     def __init__(self):
-        self.data = dict(DEFAULTS)
+        # Deep copy so the mutable "dictionary" list is never shared with
+        # DEFAULTS (appending a word must not change the defaults).
+        self.data = copy.deepcopy(DEFAULTS)
         self.load()
 
     def load(self):
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 stored = json.load(f)
+            if not isinstance(stored, dict):
+                raise ValueError("config.json is not a JSON object")
             # Merge so new keys added in future versions get defaults.
-            self.data = {**DEFAULTS, **stored}
+            self.data = {**copy.deepcopy(DEFAULTS), **stored}
         except FileNotFoundError:
             self.save()
         except Exception:

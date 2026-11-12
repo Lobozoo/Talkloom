@@ -102,6 +102,30 @@ _MODIFIER_QT_KEYS = {
 }
 
 
+def _unshifted_char(event) -> str | None:
+    """The character a key produces with NO modifiers held, from its Windows
+    virtual-key code. None if it can't be worked out."""
+    import sys
+    try:
+        vk = event.nativeVirtualKey()
+    except Exception:
+        return None
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:    # 0-9, A-Z: VK == ASCII
+        return chr(vk).lower()
+    if vk and sys.platform == "win32":
+        try:
+            import ctypes
+            # MAPVK_VK_TO_CHAR (2). The top bit flags a dead key — mask it.
+            ch = ctypes.windll.user32.MapVirtualKeyW(vk, 2) & 0x7FFF
+            if ch:
+                c = chr(ch).lower()
+                if c.isprintable() and c.strip():
+                    return c
+        except Exception:
+            pass
+    return None
+
+
 def _combo_from_qt(event) -> list[str] | None:
     """Translate a QKeyEvent into a pynput-name combo, or None if it's only
     modifiers so far (capture continues until a non-modifier key arrives)."""
@@ -123,8 +147,14 @@ def _combo_from_qt(event) -> list[str] | None:
     if key in _QT_KEY_NAMES:
         combo.append(_QT_KEY_NAMES[key])
     else:
+        # Prefer the PHYSICAL key over the typed character: with Shift held,
+        # the "1" key types "!" — but the hotkey listener sees it as "1", so
+        # a binding stored as "!" would never fire.
+        base = _unshifted_char(event)
         text = event.text()
-        if text and text.isprintable() and text.strip():
+        if base:
+            combo.append(base)
+        elif text and text.isprintable() and text.strip():
             combo.append(text.lower())
         elif Qt.Key.Key_A.value <= key.value <= Qt.Key.Key_Z.value:
             combo.append(chr(key.value).lower())
@@ -347,6 +377,10 @@ class SettingsDialog(QDialog):
         self.history_chk.setChecked(config["keep_history"])
         form.addRow("", self.history_chk)
 
+        self.commands_chk = QCheckBox('Voice commands: say "new line" or "new paragraph"')
+        self.commands_chk.setChecked(config["voice_commands"])
+        form.addRow("", self.commands_chk)
+
         save_btn = QPushButton("Save")
         save_btn.setObjectName("saveBtn")
         save_btn.clicked.connect(self._save)
@@ -560,13 +594,17 @@ class SettingsDialog(QDialog):
             return
         import os
         data_dir = cfg_mod.app_data_dir()
-        for name in ("stats.json", "history.txt", "log.txt", "log.txt.1", "log.txt.2"):
+        # The log is held open by the logger, and Windows won't delete an
+        # open file — clear_logs() closes it, deletes it, and reopens it.
+        cfg_mod.clear_logs()
+        for name in ("stats.json", "history.txt"):
             try:
                 os.remove(os.path.join(data_dir, name))
             except FileNotFoundError:
                 pass
             except Exception:
                 logging.exception("Failed to remove %s", name)
+        logging.info("All data reset by user")
         # Clear dictionary from live config and disk
         self.app_ctrl.config["dictionary"] = []
         self.app_ctrl.config.save()
@@ -628,11 +666,13 @@ class SettingsDialog(QDialog):
             )
             return
 
+        model_changed = config["model_size"] != self.model_box.currentText()
         config["hotkey"] = self.hotkey_btn.combo
         config["add_word_hotkey"] = self.addword_btn.combo
         config["model_size"] = self.model_box.currentText()
         config["start_with_windows"] = self.startup_chk.isChecked()
         config["keep_history"] = self.history_chk.isChecked()
+        config["voice_commands"] = self.commands_chk.isChecked()
         config["dictionary"] = [
             self.dict_list.item(i).text() for i in range(self.dict_list.count())
         ]
@@ -647,6 +687,11 @@ class SettingsDialog(QDialog):
             config["add_word_hotkey"], self.app_ctrl._on_add_word_hotkey
         )
         self.app_ctrl.transcriber.set_model_size(config["model_size"])
+        if model_changed:
+            # Load (and if needed download, with a progress dialog) the new
+            # model now, in the background — not silently during the next
+            # dictation.
+            self.app_ctrl.preload_model()
         cfg_mod.set_startup(config["start_with_windows"])
         self.accept()
 

@@ -48,7 +48,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-First launch downloads the Whisper `base` model (~145 MB) to
+First launch downloads the Whisper `small` model (~480 MB) to
 `%APPDATA%\Talkloom\models` — one time only. On corporate machines with
 TLS-inspection proxies (Zscaler etc.), this is handled automatically via
 `truststore`.
@@ -170,4 +170,4 @@ via Settings → Statistics → *Open log*).
 - Windows 10/11 (64-bit)
 - Python 3.11–3.13
 - Microphone
-- ~500 MB disk for dependencies + ~200 MB for the Whisper base model
+- ~500 MB disk for dependencies + ~500 MB for the Whisper small model

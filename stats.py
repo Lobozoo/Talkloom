@@ -7,6 +7,7 @@ summary() from the GUI thread). Keeps all-time totals plus a rolling 30 days
 of per-day counts.
 """
 
+import copy
 import datetime
 import json
 import logging
@@ -33,11 +34,20 @@ def _path() -> str:
 
 
 def _load() -> dict:
+    # Deep copy: _DEFAULT["days"] is a mutable dict. A shallow copy would let
+    # record() write today's counts INTO the defaults, so they'd reappear
+    # after a reset.
+    d = copy.deepcopy(_DEFAULT)
     try:
         with open(_path(), "r", encoding="utf-8") as f:
-            return {**_DEFAULT, **json.load(f)}
+            stored = json.load(f)
+        if isinstance(stored, dict):
+            d.update(stored)
+        if not isinstance(d.get("days"), dict):
+            d["days"] = {}
     except Exception:
-        return dict(_DEFAULT)
+        pass
+    return d
 
 
 def record(words: int, chars: int, speech_seconds: float, corrections: int):

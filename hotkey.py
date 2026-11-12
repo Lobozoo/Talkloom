@@ -13,6 +13,7 @@ No admin rights are required for pynput global hooks on Windows.
 """
 
 import logging
+import sys
 
 from pynput import keyboard
 
@@ -24,6 +25,32 @@ _MOD_CANON = {
     "shift_l": "shift", "shift_r": "shift",
     "cmd": "win", "cmd_l": "win", "cmd_r": "win",
 }
+
+
+# Windows virtual-key codes for the modifier names above — used to ask the OS
+# whether a key we believe is held is REALLY still down.
+_VK_FOR_NAME = {
+    "ctrl": (0x11,), "alt": (0x12,), "shift": (0x10,), "win": (0x5B, 0x5C),
+}
+
+
+def _physically_down(name: str) -> bool | None:
+    """Ask Windows whether a key is down right now. None = can't tell
+    (non-Windows, or a key we have no virtual-key code for)."""
+    if sys.platform != "win32":
+        return None
+    vks = _VK_FOR_NAME.get(name)
+    if vks is None:
+        if len(name) == 1 and name.isascii() and name.isalnum():
+            vks = (ord(name.upper()),)      # letters/digits: VK == ASCII code
+        else:
+            return None
+    try:
+        import ctypes
+        get = ctypes.windll.user32.GetAsyncKeyState
+        return any(get(vk) & 0x8000 for vk in vks)
+    except Exception:
+        return None
 
 
 def _key_name(listener: keyboard.Listener, key) -> str | None:
@@ -96,7 +123,36 @@ class HotkeyListener:
     def all_released(self) -> bool:
         """True when no tracked keys are physically down — used to delay text
         injection until the user's fingers are off the hotkey."""
+        self._prune_stuck()
         return not self._pressed
+
+    def _prune_stuck(self):
+        """Forget keys we think are held but Windows says are up.
+
+        A key-up can be missed entirely — the PC is locked with Win+L, a UAC
+        prompt takes over, the hook is restarted mid-press. The key then
+        stays in _pressed forever: every paste waits the full 2 s for
+        "release", and the hotkey can fire with only some of its keys
+        pressed. Iterates over a copy because the hook thread mutates the
+        set concurrently."""
+        for name in list(self._pressed):
+            if _physically_down(name) is False:
+                self._pressed.discard(name)
+
+    def reconcile(self):
+        """Called periodically from the GUI thread. If a missed key-up left
+        the hold-to-talk combo 'active', end it — otherwise the microphone
+        would stay open until the next press."""
+        self._prune_stuck()
+        if self._active and not (self.combo <= self._pressed):
+            self._active = False
+            logging.warning("Hotkey release was missed — ending recording")
+            try:
+                self.on_deactivate()
+            except Exception:
+                logging.exception("Hotkey on_deactivate failed")
+        if self._sec_active and not (self.secondary <= self._pressed):
+            self._sec_active = False
 
     def is_running(self) -> bool:
         return self._listener.running
@@ -123,6 +179,11 @@ class HotkeyListener:
         name = _key_name(self._listener, key)
         if name is None or self.paused:
             return
+        # Prune BEFORE adding: inside a low-level hook, Windows has not yet
+        # updated its key state for the key being pressed right now, so it
+        # would look "up" and be pruned straight away.
+        if name not in self._pressed:      # skip on auto-repeat
+            self._prune_stuck()
         self._pressed.add(name)
         # OS auto-repeat re-fires on_press while held; _active guards against
         # starting the recorder more than once.

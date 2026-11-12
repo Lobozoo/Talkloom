@@ -30,6 +30,8 @@ def append(text: str):
     """Append one dictation. Called from the pipeline thread."""
     if not text:
         return
+    # One dictation per line: flatten any line breaks it contains.
+    text = " / ".join(part.strip() for part in text.split("\n") if part.strip())
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     with _LOCK:
         try:

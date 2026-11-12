@@ -47,22 +47,36 @@ def model_is_cached(size: str) -> bool:
     return False
 
 
+# Whisper imitates the style of the text it is shown before the audio. A
+# short, properly punctuated example nudges it to write full sentences with
+# commas and capitals — the smaller models otherwise sometimes drift into
+# unpunctuated lowercase. Works alongside the dictionary hotwords.
+PUNCTUATION_HINT = (
+    "The following is a dictated note. It is written in complete sentences, "
+    "with proper punctuation, commas, and capital letters."
+)
+
+
 class Transcriber:
-    def __init__(self, model_size: str = "base", language: str | None = "en"):
+    def __init__(self, model_size: str = "small", language: str | None = "en",
+                 punctuation_hint: bool = True):
         self.model_size = model_size
+        self.initial_prompt = PUNCTUATION_HINT if punctuation_hint else None
         # Pinning the language skips Whisper's per-utterance auto-detection,
         # which is unreliable on short clips (it guesses from ~1 s of audio).
         # None = auto-detect.
         self.language = language
         self._model = None
+        self._loaded_size: str | None = None   # size of the model in memory
         self._lock = threading.Lock()   # model load + inference are serialised
 
     def set_model_size(self, size: str):
-        with self._lock:
-            if size != self.model_size:
-                self.model_size = size
-                self._model = None      # reload lazily on next use
-                logging.info("Model size changed to %s (will reload)", size)
+        # Deliberately lock-free: this is called from the GUI thread (Settings
+        # → Save). Taking self._lock here would freeze the window for as long
+        # as a transcription is running. _load_locked() notices the change.
+        if size != self.model_size:
+            self.model_size = size
+            logging.info("Model size changed to %s (will reload)", size)
 
     def load(self):
         """Load (and download if needed) the model. Safe to call repeatedly."""
@@ -70,20 +84,23 @@ class Transcriber:
             self._load_locked()
 
     def _load_locked(self):
-        if self._model is not None:
+        size = self.model_size
+        if self._model is not None and self._loaded_size == size:
             return
         from faster_whisper import WhisperModel
 
         device, compute_type = _detect_device()
         logging.info(
-            "Loading Whisper '%s' on %s (%s)…", self.model_size, device, compute_type
+            "Loading Whisper '%s' on %s (%s)…", size, device, compute_type
         )
+        self._model = None              # free the old model before loading
         self._model = WhisperModel(
-            self.model_size,
+            size,
             device=device,
             compute_type=compute_type,
             download_root=models_dir(),
         )
+        self._loaded_size = size
         logging.info("Whisper model ready")
 
     def transcribe(self, audio: np.ndarray, hotwords: str | None = None) -> str:
@@ -95,6 +112,7 @@ class Transcriber:
                 audio,
                 language=self.language, # pinned (config) or None = auto-detect
                 hotwords=hotwords,      # nudge decoding toward dictionary words
+                initial_prompt=self.initial_prompt,   # punctuation style hint
                 vad_filter=True,        # second-stage VAD trims residual silence
                 beam_size=5,
             )
